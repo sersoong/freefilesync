@@ -1,0 +1,315 @@
+When manually compiling FreeFileSync, you should also fix the following bugs in its library dependencies.
+FreeFileSync generally uses the latest library versions and works with upstream to get the bugs fixed
+that affect FreeFileSync. Therefore it is NOT RECOMMENDED TO COMPILE AGAINST OLDER library versions than
+the ones mentioned below. The remaining issues that are yet to be fixed are listed in the following:
+
+
+-----------------
+| libcurl 7.6.7 |
+-----------------
+__________________________________________________________________________________________________________
+/lib/ftp.c
+https://github.com/curl/curl/issues/1455
+
+Add:
+	static bool is_routable_ip_v4(unsigned int ip[4])
+	{
+		if (ip[0] == 127 || //127.0.0.0/8 (localhost)
+			ip[0] == 10  || //10.0.0.0/8 (private)
+			(ip[0] == 192 && ip[1] == 168) ||  //192.168.0.0/16 (private)
+			(ip[0] == 169 && ip[1] == 254) ||  //169.254.0.0/16 (link-local)
+			(ip[0] == 172 && ip[1] / 16 == 1)) //172.16.0.0/12 (private)
+			return false;
+		return true;
+	}
+
+
+- if (data->set.ftp_skip_ip)
+
++	bool skipIp = data->set.ftp_skip_ip;
++	if (!skipIp && !is_routable_ip_v4(ip))
++	{
++		unsigned int ip_ctrl[4];
++		if (4 != sscanf(control_address(conn), "%u.%u.%u.%u",
++						&ip_ctrl[0], &ip_ctrl[1], &ip_ctrl[2], &ip_ctrl[3]) ||
++			is_routable_ip_v4(ip_ctrl))
++			skipIp = true;
++	}
++
++	if (skipIp)
+
+__________________________________________________________________________________________________________
+/lib/ftp.c
+https://github.com/curl/curl/issues/4342
+
+- result = ftp_nb_type(conn, TRUE, FTP_LIST_TYPE);
++ result = ftp_nb_type(conn, data->set.prefer_ascii, FTP_LIST_TYPE);
+
+__________________________________________________________________________________________________________
+
+
+-----------------
+| libssh2 1.9.0 |
+-----------------
+__________________________________________________________________________________________________________
+src/session.c
+memory leak: https://github.com/libssh2/libssh2/issues/28
+
+-if (session->state & LIBSSH2_STATE_NEWKEYS)
++//if (session->state & LIBSSH2_STATE_NEWKEYS)
+
+__________________________________________________________________________________________________________
+move the following constants from src/sftp.h to include/libssh2_sftp.h:
+	#define MAX_SFTP_OUTGOING_SIZE 30000
+	#define MAX_SFTP_READ_SIZE 30000
+
+__________________________________________________________________________________________________________
+src/transport.c
+https://github.com/libssh2/libssh2/pull/443
+
+- if (encrypted && compressed)
++ if (encrypted && compressed && session->local.comp_abstract)
+
+__________________________________________________________________________________________________________
+src/openssl.cpp
+properly support ssh-ed25519: https://github.com/libssh2/libssh2/pull/416
+
++static int
++gen_publickey_from_ed_evp(LIBSSH2_SESSION* session,
++                          unsigned char** method,
++                          size_t* method_len,
++                          unsigned char** pubkeydata,
++                          size_t* pubkeydata_len,
++                          EVP_PKEY* pk)
++{
++    const char methodName[] = "ssh-ed25519";
++    unsigned char* methodBuf = NULL;
++    unsigned char* pubKeyBuf = NULL;
++    size_t pubKeyLen = 0;
++    size_t edKeyLen = 0;
++    unsigned char* bufPos = NULL;
++
++    _libssh2_debug(session,
++                   LIBSSH2_TRACE_AUTH,
++                   "Computing public key from ED private key envelop");
++
++    methodBuf = LIBSSH2_ALLOC(session, sizeof(methodName) - 1);
++    if (!methodBuf)
++    {
++        _libssh2_error(session, LIBSSH2_ERROR_ALLOC,
++                       "Unable to allocate memory for private key data");
++        goto cleanup;
++    }
++	
++    if (EVP_PKEY_get_raw_public_key(pk, NULL, &edKeyLen) != 1)
++    {
++        _libssh2_error(session, LIBSSH2_ERROR_PROTO,
++                       "EVP_PKEY_get_raw_public_key failed");
++        goto cleanup;
++    }
++
++    pubKeyLen = 4 + sizeof(methodName) - 1  + 4 + edKeyLen;
++    bufPos = pubKeyBuf = LIBSSH2_ALLOC(session, pubKeyLen);
++    if (!pubKeyBuf)
++    {
++        _libssh2_error(session, LIBSSH2_ERROR_ALLOC,
++                       "Unable to allocate memory for private key data");
++        goto cleanup;
++    }
++
++    _libssh2_store_str(&bufPos, methodName, sizeof(methodName) - 1);
++    _libssh2_store_u32(&bufPos, edKeyLen);
++
++    if (EVP_PKEY_get_raw_public_key(pk, bufPos, &edKeyLen) != 1)
++    {
++        _libssh2_error(session, LIBSSH2_ERROR_PROTO,
++                       "EVP_PKEY_get_raw_public_key failed");
++        goto cleanup;
++    }
++
++    memcpy(methodBuf, methodName, sizeof(methodName) - 1);
++    *method         = methodBuf;
++    *method_len     = sizeof(methodName) - 1;
++    *pubkeydata     = pubKeyBuf;
++    *pubkeydata_len = pubKeyLen;
++    return 0;
++
++cleanup:
++    if (methodBuf)
++        LIBSSH2_FREE(session, methodBuf);
++    if (pubKeyBuf)
++        LIBSSH2_FREE(session, pubKeyBuf);
++    return -1;
++}
++
+static int
+gen_publickey_from_ed25519_openssh_priv_data(LIBSSH2_SESSION* session,
+                                             struct string_buf* decrypted,
+                                             unsigned char** method,
+                                             size_t* method_len,
+                                             unsigned char** pubkeydata,
+
+
+
+
+int
+_libssh2_ed25519_new_private_frommemory(libssh2_ed25519_ctx** ed_ctx,
+                                        LIBSSH2_SESSION* session,
+                                        const char* filedata,
+                                        size_t filedata_len,
+                                        unsigned const char* passphrase)
+{
++    libssh2_ed25519_ctx* ctx = NULL;
++
++    _libssh2_init_if_needed();
++
++    ctx = _libssh2_ed25519_new_ctx();
++    if (!ctx)
++        return _libssh2_error(session, LIBSSH2_ERROR_ALLOC,
++                              "Unable to allocate memory for ed25519 key");
++
++    if (read_private_key_from_memory((void**)&ctx->private_key, (pem_read_bio_func)&PEM_read_bio_PrivateKey,
++                                     filedata, filedata_len, passphrase) == 0)
++    {
++        if (EVP_PKEY_id(ctx->private_key) != EVP_PKEY_ED25519)
++        {
++            _libssh2_ed25519_free(ctx);
++            return _libssh2_error(session, LIBSSH2_ERROR_PROTO,
++                                  "Private key is not an ed25519 key");
++        }
++
++        *ed_ctx = ctx;
++        return 0;
++    }
++    _libssh2_ed25519_free(ctx);
+
+    return read_openssh_private_key_from_memory((void**)ed_ctx, session,
+                                                "ssh-ed25519",
+                                                filedata, filedata_len,
+                                                passphrase);
+
+												
+												
+#ifdef HAVE_OPAQUE_STRUCTS
+    pktype = EVP_PKEY_id(pk);
+#else
+    pktype = pk->type;
+#endif
+
+    switch (pktype)
+    {
++#if LIBSSH2_ED25519
++        case EVP_PKEY_ED25519 :
++            st = gen_publickey_from_ed_evp(session, method, method_len,
++                                           pubkeydata, pubkeydata_len, pk);
++            break;
++#endif /* LIBSSH2_ED25519 */
+        case EVP_PKEY_RSA :
+            st = gen_publickey_from_rsa_evp(session, method, method_len,
+__________________________________________________________________________________________________________
+
+
+-------------------
+| wxWidgets 3.1.3 |
+-------------------
+__________________________________________________________________________________________________________
+/src/aui/framemanager.cpp:
+Fix incorrect pane height calculations:
+
+-        // determine the dock's minimum size
+-        bool plus_border = false;
+-        bool plus_caption = false;
+-        int dock_min_size = 0;
+-        for (j = 0; j < dock_pane_count; ++j)
+-        {
+-            wxAuiPaneInfo& pane = *dock.panes.Item(j);
+-            if (pane.min_size != wxDefaultSize)
+-            {
+-                if (pane.HasBorder())
+-                    plus_border = true;
+-                if (pane.HasCaption())
+-                    plus_caption = true;
+-                if (dock.IsHorizontal())
+-                {
+-                    if (pane.min_size.y > dock_min_size)
+-                        dock_min_size = pane.min_size.y;
+-                }
+-                else
+-                {
+-                    if (pane.min_size.x > dock_min_size)
+-                        dock_min_size = pane.min_size.x;
+-                }
+-            }
+-        }
+-
+-        if (plus_border)
+-            dock_min_size += (pane_borderSize*2);
+-        if (plus_caption && dock.IsHorizontal())
+-            dock_min_size += (caption_size);
+-
+-        dock.min_size = dock_min_size;
+
++        // determine the dock's minimum size
++        int dock_min_size = 0;
++       for (j = 0; j < dock_pane_count; ++j)
++        {
++            wxAuiPaneInfo& pane = *dock.panes.Item(j);
++            if (pane.min_size != wxDefaultSize)
++            {
++				int paneSize = dock.IsHorizontal() ? pane.min_size.y : pane.min_size.x;
++                if (pane.HasBorder())
++					paneSize += 2 * pane_borderSize;
++                if (pane.HasCaption() && dock.IsHorizontal())
++					paneSize += caption_size;
++
++				if (paneSize > dock_min_size)
++					dock_min_size = paneSize;
++            }
++        }
++
++        dock.min_size = dock_min_size;
+
+__________________________________________________________________________________________________________
+/src/gtk/menu.cpp
+
+-g_signal_connect(m_menu, "map", G_CALLBACK(menu_map), this);
++g_signal_connect(m_menu, "show", G_CALLBACK(menu_map), this); //"map" is never called on Ubuntu Unity, but "show" is
+
+__________________________________________________________________________________________________________
+/src/gtk/window.cpp
+Backspace not working in filter dialog: http://www.freefilesync.org/forum/viewtopic.php?t=347
+
+ void wxWindowGTK::ConnectWidget( GtkWidget *widget )
+ {
+-     static bool isSourceAttached;
+-    if (!isSourceAttached)
+-    {
+-        // attach GSource to detect new GDK events
+-        isSourceAttached = true;
+-        static GSourceFuncs funcs =
+-        {
+-            source_prepare, source_check, source_dispatch,
+-            NULL, NULL, NULL
+-        };
+-        GSource* source = g_source_new(&funcs, sizeof(GSource));
+-        // priority slightly higher than GDK_PRIORITY_EVENTS
+-        g_source_set_priority(source, GDK_PRIORITY_EVENTS - 1);
+-        g_source_attach(source, NULL);
+-        g_source_unref(source);
+-    }
+ 
+     g_signal_connect (widget, "key_press_event",
+                       G_CALLBACK (gtk_window_key_press_callback), this);
+
+__________________________________________________________________________________________________________
+/include/wx/window.h
+wxWidgets/GTK2 on some Linux systems incorrectly detects high DPI: https://freefilesync.org/forum/viewtopic.php?t=6114
+=> hack away high-DPI support for GTK2 (= pretend GTK2 has device independent pixels, which it clearly has not!)
+
+    #include "wx/gtk/window.h"
+-   #ifdef __WXGTK3__
++    //#ifdef __WXGTK3__
+        #define wxHAVE_DPI_INDEPENDENT_PIXELS
+-   #endif
++	//#endif
+__________________________________________________________________________________________________________
